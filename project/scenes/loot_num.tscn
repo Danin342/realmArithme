@@ -1,0 +1,54 @@
+[gd_scene load_steps=7 format=3 uid="uid://c72omvq854bdl"]
+
+[ext_resource type="Script" uid="uid://dsl1gi5nnpjx1" path="res://scripts/loot_num.gd" id="1_u302n"]
+
+[sub_resource type="Animation" id="Animation_k4at8"]
+length = 0.001
+
+[sub_resource type="Animation" id="Animation_3apf5"]
+resource_name = "new_animation"
+length = 0.5
+
+[sub_resource type="Animation" id="Animation_ma81e"]
+resource_name = "new_animation_2"
+
+[sub_resource type="AnimationLibrary" id="AnimationLibrary_iepmm"]
+_data = {
+&"RESET": SubResource("Animation_k4at8"),
+&"new_animation": SubResource("Animation_3apf5"),
+&"new_animation_2": SubResource("Animation_ma81e")
+}
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_u302n"]
+radius = 5.0
+
+[node name="LootNum" type="StaticBody2D"]
+script = ExtResource("1_u302n")
+
+[node name="AnimationPlayer" type="AnimationPlayer" parent="."]
+libraries = {
+&"": SubResource("AnimationLibrary_iepmm")
+}
+
+[node name="Area2D" type="Area2D" parent="."]
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Area2D"]
+shape = SubResource("CircleShape2D_u302n")
+
+[node name="Label" type="Label" parent="Area2D"]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -10.0
+offset_top = -6.0
+offset_right = 30.0
+offset_bottom = 17.0
+grow_horizontal = 2
+grow_vertical = 2
+scale = Vector2(0.5, 0.5)
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[connection signal="body_entered" from="Area2D" to="." method="_on_area_2d_body_entered"]
