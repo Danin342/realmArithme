@@ -1,3 +1,11 @@
+# .github/workflows/deploy.yml
+# Summary:
+# - Moves export templates into the expected path for the container.
+# - Verifies critical assets exist (helps catch case-sensitive path issues on Linux CI).
+# - Runs Godot headlessly to (re)import assets so .import metadata exists in CI.
+# - Exports using your "Web" preset to build/web/index.html.
+# - Adds coi-service-worker and deploys to gh-pages.
+
 name: "Publish to GitHub Pages"
 
 env:
@@ -8,7 +16,6 @@ on:
   push:
     branches:
       - main
-
 
 jobs:
   deploy:
@@ -23,21 +30,78 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Ensure export templates are in the location Godot expects inside the container
       - name: Move HTML5 templates into position
         run: |
           mkdir -v -p ~/.local/share/godot/export_templates
           mv /root/.local/share/godot/export_templates/${GODOT_VERSION}.stable ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+
       - name: Create staging directory
         run: mkdir -v -p build/web
 
+      # Fail fast if critical assets are missing in the repo (case-sensitive check).
+      # This catches path mismatches that work locally on macOS/Windows but fail on Linux CI.
+      - name: Verify critical assets exist
+        run: |
+          set -e
+          files=(
+            "project/art/sprites/tilesets/walls/walls.png"
+            "project/art/sprites/tilesets/walls/wooden_door.png"
+            "project/art/sprites/tilesets/walls/wooden_door_b.png"
+            "project/art/sprites/tilesets/fences.png"
+            "project/art/sprites/tilesets/floors/decor_8x8.png"
+            "project/art/sprites/tilesets/floors/decor_16x16.png"
+            "project/art/sprites/tilesets/floors/grass.png"
+            "project/art/sprites/tilesets/floors/plains.png"
+            "project/art/sprites/tilesets/water-sheet.png"
+            "project/art/sprites/tilesets/water1.png"
+            "project/art/sprites/tilesets/water2.png"
+            "project/art/sprites/tilesets/water3.png"
+            "project/art/sprites/tilesets/water4.png"
+            "project/art/sprites/tilesets/water5.png"
+            "project/art/sprites/tilesets/water6.png"
+            "project/art/sprites/tilesets/water_decorations.png"
+            "project/art/sprites/tilesets/water_lilies.png"
+            "project/art/sprites/characters/blob_simple.png"
+            "project/art/sprites/characters/blob_simple_1.png"
+            "project/art/sprites/characters/blob_simple_2.png"
+            "project/art/sprites/characters/player.png"
+            "project/sounds/hit.ogg"
+          )
+          missing=0
+          for f in "${files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "ERROR: Missing asset in repo: $f"
+              missing=1
+            else
+              echo "Found asset: $f"
+            fi
+          done
+          if [ "$missing" -eq 1 ]; then
+            echo "One or more assets are missing or path/case differs from scene references."
+            exit 1
+          fi
+
+      # Headless import: opens the editor headlessly and imports assets, creating .import metadata.
+      # This ensures resources load in CI even if .import files aren't committed or need regeneration.
+      - name: Headless asset import
+        working-directory: project
+        run: |
+          godot4 --headless --quit --path .
+
+      # Export the game using the export preset name exactly as defined in your project.
+      # If your preset is named "Web" (as your current file shows), keep "Web".
+      # If instead it's "HTML5", change the name below accordingly.
       - name: Build
-        run: godot -v --export-release --headless "Web" ../build/web/index.html project/project.godot
+        run: |
+          godot4 -v --export-release --headless "Web" build/web/index.html project/project.godot
 
       - name: Add coi-service-worker
         run: |
           git clone https://github.com/gzuidhof/coi-serviceworker.git
           mv coi-serviceworker/coi-serviceworker.js build/web/coi-serviceworker.js
           sed -i '3 i <script src="coi-serviceworker.js"></script>' build/web/index.html
+
       - name: Deploy
         uses: peaceiris/actions-gh-pages@v3.9.3
         with:
