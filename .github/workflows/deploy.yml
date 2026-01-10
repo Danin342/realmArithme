@@ -1,49 +1,188 @@
-name: "Publish to GitHub Pages"
-
-env:
-  GODOT_VERSION: 4.4.1
+# .github/workflows/deploy.yml
+name: Deploy Godot HTML5 to GitHub Pages
 
 on:
-  workflow_dispatch:
   push:
-    branches:
-      - main
+    branches: [ main ]
+  workflow_dispatch:
 
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    container:
-      image: barichello/godot-ci:4.4.1
 
     steps:
-      - name: Checkout
+      - name: Checkout repo with LFS
         uses: actions/checkout@v4
-
-      - name: Move HTML5 templates into position
-        run: |
-          mkdir -v -p ~/.local/share/godot/export_templates
-          mv /root/.local/share/godot/export_templates/${GODOT_VERSION}.stable ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
-      - name: Create staging directory
-        run: mkdir -v -p build/web
-
-      - name: Build
-        run: godot -v --export-release --headless "Web" ../build/web/index.html project/project.godot
-
-      - name: Add coi-service-worker
-        run: |
-          git clone https://github.com/gzuidhof/coi-serviceworker.git
-          mv coi-serviceworker/coi-serviceworker.js build/web/coi-serviceworker.js
-          sed -i '3 i <script src="coi-serviceworker.js"></script>' build/web/index.html
-      - name: Deploy
-        uses: peaceiris/actions-gh-pages@v3.9.3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./build/web
-          force_orphan: true
-          user_name: "github-ci[bot]"
-          user_email: "github-actions[bot]@users.noreply.github.com"
-          commit_message: "Publish to gh-pages"
+          lfs: true
+
+      - name: Ensure Git LFS installed and fetch binaries
+        run: |
+          set -euo pipefail
+          if ! git lfs version >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y git-lfs
+            git lfs install
+          fi
+          git lfs pull
+          # Show any unresolved LFS pointer files for debugging
+          grep -RIl "^version https://git-lfs.github.com/spec" || true
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Install tools (ffmpeg, ImageMagick, wget, unzip)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg imagemagick wget unzip
+
+      - name: Verify audio and image assets
+        run: |
+          set -euo pipefail
+
+          echo "Verifying OGG Vorbis audio..."
+          fail=0
+          oggs=( "sounds/success.ogg" "sounds/success_longer.ogg" "sounds/incorrect.ogg" "sounds/hit.ogg" "sounds/correct.ogg" )
+          for f in "${oggs[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "::error file=$f::Missing file"
+              fail=1
+              continue
+            fi
+
+            mime=$(file -b --mime-type "$f")
+            if ! echo "$mime" | grep -qiE 'ogg'; then
+              echo "::error file=$f::Not an Ogg container (detected $mime)"
+              fail=1
+            fi
+
+            # Confirm Vorbis codec
+            if ! ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$f" | grep -qiE '^vorbis$'; then
+              echo "::error file=$f::Audio stream is not Vorbis. Re-encode to Vorbis."
+              fail=1
+            fi
+          done
+
+          echo "Verifying PNG images..."
+          pngs=( "art/sprites/tilesets/walls/wooden_door_b.png" "art/sprites/tilesets/walls/wooden_door.png" "art/sprites/tilesets/walls/walls.png" )
+          for f in "${pngs[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "::error file=$f::Missing file"
+              fail=1
+              continue
+            fi
+
+            mime=$(file -b --mime-type "$f")
+            if [ "$mime" != "image/png" ]; then
+              echo "::error file=$f::Not a PNG (detected $mime). Convert or fix the source."
+              fail=1
+            fi
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            echo "Asset verification failed."
+            exit 1
+          fi
+
+      - name: Install Godot headless for export
+        run: |
+          set -euo pipefail
+          GODOT_VERSION="4.3"
+          GODOT_DL="https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          EXPORT_TEMPLATES_DL="https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+
+          mkdir -p "$HOME/godot"
+          wget -O "$HOME/godot/godot.zip" "$GODOT_DL"
+          unzip -q "$HOME/godot/godot.zip" -d "$HOME/godot"
+          GODOT_BIN=$(find "$HOME/godot" -type f -name "Godot_v${GODOT_VERSION}-stable_linux.x86_64")
+
+          wget -O "$HOME/godot/export_templates.tpz" "$EXPORT_TEMPLATES_DL"
+          unzip -q "$HOME/godot/export_templates.tpz" -d "$HOME/godot"
+          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
+          # Move all template contents into the versioned dir
+          find "$HOME/godot/templates" -mindepth 1 -maxdepth 1 -exec mv {} "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable" \;
+
+          echo "Godot binary at: $GODOT_BIN"
+          "$GODOT_BIN" --version
+
+          echo "GODOT_BIN=$GODOT_BIN" >> $GITHUB_ENV
+          echo "GODOT_VERSION=$GODOT_VERSION" >> $GITHUB_ENV
+
+      - name: Move HTML5 templates into position (if needed)
+        run: |
+          set -euo pipefail
+          # Godot puts templates via export_templates; this step aligns with your previous logs
+          ls -la "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable" || true
+
+      - name: Create staging directory
+        run: |
+          set -euo pipefail
+          rm -rf build_html5
+          mkdir -p build_html5
+
+      - name: Build HTML5 export
+        run: |
+          set -euo pipefail
+          # Export preset must be defined in project.godot (e.g., name="HTML5")
+          "$GODOT_BIN" --headless --path . --export-release "HTML5" build_html5/index.html
+
+      - name: Add coi-service-worker for SharedArrayBuffer
+        run: |
+          set -euo pipefail
+          cat > build_html5/coi-service-worker.js <<'EOF'
+          // Minimal COOP/COEP service worker to enable SharedArrayBuffer in browsers
+          self.addEventListener('install', function(event) {
+            self.skipWaiting();
+          });
+          self.addEventListener('activate', function(event) {
+            event.waitUntil(self.clients.claim());
+          });
+          self.addEventListener('fetch', function(event) {
+            event.respondWith(
+              (async () => {
+                const r = await fetch(event.request);
+                const newHeaders = new Headers(r.headers);
+                newHeaders.set('Cross-Origin-Opener-Policy', 'same-origin');
+                newHeaders.set('Cross-Origin-Embedder-Policy', 'require-corp');
+                return new Response(r.body, {
+                  status: r.status,
+                  statusText: r.statusText,
+                  headers: newHeaders,
+                });
+              })()
+            );
+          });
+          EOF
+
+          # Inject registration script into index.html if not present
+          if ! grep -q "coi-service-worker.js" build_html5/index.html; then
+            # Insert before closing </body>
+            tmpfile=$(mktemp)
+            awk '
+              /<\/body>/ && !done {
+                print "<script>if(window.crossOriginIsolated!==true){try{navigator.serviceWorker.register(\"coi-service-worker.js\")}catch(e){console.warn(\"SW reg failed\",e)}}<\/script>"
+                done=1
+              }
+              { print }
+            ' build_html5/index.html > "$tmpfile"
+            mv "$tmpfile" build_html5/index.html
+          fi
+
+      - name: Upload artifact for GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build_html5
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
