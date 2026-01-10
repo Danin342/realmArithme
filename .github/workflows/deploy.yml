@@ -1,181 +1,49 @@
-# .github/workflows/deploy.yml
-name: Deploy Godot HTML5 to GitHub Pages
+name: "Publish to GitHub Pages"
+
+env:
+  GODOT_VERSION: 4.4.1
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: "pages"
-  cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    container:
+      image: barichello/godot-ci:4.4.1
 
     steps:
-      - name: Checkout with Git LFS
+      - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Move HTML5 templates into position
+        run: |
+          mkdir -v -p ~/.local/share/godot/export_templates
+          mv /root/.local/share/godot/export_templates/${GODOT_VERSION}.stable ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+      - name: Create staging directory
+        run: mkdir -v -p build/web
+
+      - name: Build
+        run: godot -v --export-release --headless "Web" ../build/web/index.html project/project.godot
+
+      - name: Add coi-service-worker
+        run: |
+          git clone https://github.com/gzuidhof/coi-serviceworker.git
+          mv coi-serviceworker/coi-serviceworker.js build/web/coi-serviceworker.js
+          sed -i '3 i <script src="coi-serviceworker.js"></script>' build/web/index.html
+      - name: Deploy
+        uses: peaceiris/actions-gh-pages@v3.9.3
         with:
-          lfs: true
-
-      - name: Ensure Git LFS installed and pull binaries
-        run: |
-          set -euo pipefail
-          if ! git lfs version >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y git-lfs
-            git lfs install
-          fi
-          git lfs pull
-          echo "Checking for leftover LFS pointer files..."
-          # If any files still contain LFS pointer text, list them
-          grep -RIl "^version https://git-lfs.github.com/spec" || true
-
-      - name: Setup GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: Install tools (ffmpeg, ImageMagick)
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg imagemagick
-
-      - name: Verify assets exist and validate formats
-        run: |
-          set -euo pipefail
-          fail=0
-
-          echo "Discovering OGG files under sounds/..."
-          mapfile -t oggs < <(find sounds -type f -iname "*.ogg" || true)
-          if [ "${#oggs[@]}" -eq 0 ]; then
-            echo "::error::No .ogg files found under sounds/. Make sure they are committed and paths are correct."
-            fail=1
-          else
-            for f in "${oggs[@]}"; do
-              if [ ! -s "$f" ]; then
-                echo "::error file=$f::File missing or empty"
-                fail=1
-                continue
-              fi
-              mime=$(file -b --mime-type "$f")
-              if ! echo "$mime" | grep -qiE 'ogg'; then
-                echo "::error file=$f::Not an Ogg container (detected $mime)"
-                fail=1
-              fi
-              # Confirm Vorbis codec
-              if ! ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$f" | grep -qiE '^vorbis$'; then
-                echo "::error file=$f::Audio stream is not Vorbis. Re-encode to Vorbis."
-                fail=1
-              fi
-            done
-          fi
-
-          echo "Discovering PNG files under art/..."
-          mapfile -t pngs < <(find art -type f -iname "*.png" || true)
-          if [ "${#pngs[@]}" -eq 0 ]; then
-            echo "::warning::No .png files found under art/. If your art uses other formats, adjust validation."
-          else
-            for f in "${pngs[@]}"; do
-              if [ ! -s "$f" ]; then
-                echo "::error file=$f::File missing or empty"
-                fail=1
-                continue
-              fi
-              mime=$(file -b --mime-type "$f")
-              if [ "$mime" != "image/png" ]; then
-                echo "::error file=$f::Not a PNG (detected $mime). Convert or fix the source."
-                fail=1
-              fi
-            done
-          fi
-
-          if [ "$fail" -ne 0 ]; then
-            echo "Asset verification failed."
-            exit 1
-          fi
-
-      - name: Install Godot headless and export templates
-        run: |
-          set -euo pipefail
-          GODOT_VERSION="4.3"
-          GODOT_ZIP="Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
-          TPL_ZIP="Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
-          GODOT_URL="https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/${GODOT_ZIP}"
-          TPL_URL="https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/${TPL_ZIP}"
-
-          mkdir -p "$HOME/godot"
-          wget -O "$HOME/godot/$GODOT_ZIP" "$GODOT_URL"
-          unzip -q "$HOME/godot/$GODOT_ZIP" -d "$HOME/godot"
-          GODOT_BIN=$(find "$HOME/godot" -type f -name "Godot_v${GODOT_VERSION}-stable_linux.x86_64")
-
-          wget -O "$HOME/godot/$TPL_ZIP" "$TPL_URL"
-          unzip -q "$HOME/godot/$TPL_ZIP" -d "$HOME/godot"
-          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable"
-          # Move export templates into expected directory
-          if [ -d "$HOME/godot/templates" ]; then
-            find "$HOME/godot/templates" -mindepth 1 -maxdepth 1 -exec mv {} "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable" \;
-          else
-            # Some tpz layouts extract directly; move any templates found
-            find "$HOME/godot" -type f -name "*.pck" -o -name "*.zip" -exec mv {} "$HOME/.local/share/godot/export_templates/${GODOT_VERSION}.stable" \;
-          fi
-
-          "$GODOT_BIN" --version
-          echo "GODOT_BIN=$GODOT_BIN" >> "$GITHUB_ENV"
-          echo "GODOT_VERSION=$GODOT_VERSION" >> "$GITHUB_ENV"
-
-      - name: Prepare build directory
-        run: |
-          set -euo pipefail
-          rm -rf build/web
-          mkdir -p build/web
-
-      - name: Export HTML5
-        run: |
-          set -euo pipefail
-          # Uses export preset named "HTML5" from export_presets.cfg
-          "$GODOT_BIN" --headless --path . --export-release "HTML5" build/web/index.html
-
-      - name: Add coi-service-worker (COOP/COEP for SharedArrayBuffer)
-        run: |
-          set -euo pipefail
-          cat > build/web/coi-service-worker.js <<'EOF'
-          self.addEventListener('install', (event) => self.skipWaiting());
-          self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
-          self.addEventListener('fetch', (event) => {
-            event.respondWith((async () => {
-              const r = await fetch(event.request);
-              const h = new Headers(r.headers);
-              h.set('Cross-Origin-Opener-Policy', 'same-origin');
-              h.set('Cross-Origin-Embedder-Policy', 'require-corp');
-              return new Response(r.body, { status: r.status, statusText: r.statusText, headers: h });
-            })());
-          });
-          EOF
-
-          if ! grep -q "coi-service-worker.js" build/web/index.html; then
-            tmp=$(mktemp)
-            awk '
-              /<\/body>/ && !done {
-                print "<script>if(window.crossOriginIsolated!==true){try{navigator.serviceWorker.register(\"coi-service-worker.js\")}catch(e){console.warn(\"SW reg failed\",e)}}<\/script>"
-                done=1
-              }
-              { print }
-            ' build/web/index.html > "$tmp"
-            mv "$tmp" build/web/index.html
-          fi
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: build/web
-
-      - name: Deploy to GitHub Pages
-        id: deploy
-        uses: actions/deploy-pages@v4
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./build/web
+          force_orphan: true
+          user_name: "github-ci[bot]"
+          user_email: "github-actions[bot]@users.noreply.github.com"
+          commit_message: "Publish to gh-pages"
